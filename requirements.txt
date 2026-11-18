@@ -1,0 +1,11 @@
+-r mfr_submission_check/requirements.txt
+streamlit>=1.38,<2
+pytest>=8,<9
+requests>=2.31,<3
+pycryptodome>=3.20,<4
+pywin32>=306; platform_system == "Windows"
+snowflake-connector-python>=3.12,<4
+pandas>=2.2,<3
+numpy>=1.26
+openpyxl>=3.1
+pytz>=2024.1

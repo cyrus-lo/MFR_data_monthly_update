@@ -1,0 +1,12 @@
+.venv/
+.pytest_cache/
+**/.env
+**/sql_execution_log.csv
+**/mfr_completion_signal.csv
+__pycache__/
+*.py[cod]
+data/
+run_logs/
+mfr_risk_check/MFR_vs_Risk_calculation/MFR_files/**/*.xlsx
+mfr_risk_check/MFR_vs_Risk_calculation/Risk_calculation_files/**/*.xlsx
+mfr_risk_check/output/*.csv

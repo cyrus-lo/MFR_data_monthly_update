@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "id": "bronze-project-completeness-before-api-trigger",
+      "enabled": true,
+      "check_type": "project_count_and_row_delta",
+      "after_task": "CHUNWO_DB.PUBLIC.TASK_MFR_EXCEL_TO_TABLE_MFR_PARALLEL",
+      "before_task": "CHUNWO_DB.PUBLIC.TASK_MFR_BRONZE_TO_SILVER",
+      "expected_projects": {
+        "source": "step3_upload_receipt"
+      },
+      "max_abs_row_count_delta": 1,
+      "tables": [
+        {
+          "name": "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_PARALLEL",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "varchar_yyyy_mm_dd",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_ACCRUAL",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_CASH_FLOW",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_COMMITTED_COST",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_PROJECTION",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        }
+      ]
+    },
+    {
+      "id": "silver-project-completeness-terminal",
+      "enabled": true,
+      "check_type": "silver_project_completeness",
+      "after_task": "CHUNWO_DB.PUBLIC.TASK_MFR_BRONZE_TO_SILVER",
+      "expected_projects": {
+        "source": "step3_upload_receipt"
+      },
+      "max_abs_row_count_delta": 1,
+      "enforce_row_count_delta": true,
+      "tables": [
+        {
+          "name": "CHUNWO_DB.MFR.MFR_2_SILVER",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "varchar_yyyy_mm_dd",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_ACCRUAL",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_CASH_FLOW",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_COMMITTED_COST",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        },
+        {
+          "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_PROJECTION",
+          "project_column": "PROJECT_CODE",
+          "report_date_column": "REPORT_DATE",
+          "report_date_type": "date",
+          "dw_created_time_column": "DW_CREATED_TIME",
+          "ingestion_cluster_interval_seconds": 120
+        }
+      ],
+      "diagnostics": [
+        {"name": "CHUNWO_DB.MFR.MFR_3_RISK", "dw_created_time_column": "DW_CREATED_TIME"},
+        {"name": "CHUNWO_DB.MFR.SUB_EMFR_GLEXPENSE", "dw_created_time_column": "DW_CREATED_TIME"},
+        {"name": "CHUNWO_DB.MFR.SUB_EMFR_POSUMMARY", "dw_created_time_column": "DW_CREATED_TIME"},
+        {"name": "CHUNWO_DB.MFR.SUB_EMFR_SUBCONCOST", "dw_created_time_column": "DW_CREATED_TIME"},
+        {"name": "CHUNWO_DB.MFR.SUB_EMFR_GLACCRUAL", "dw_created_time_column": "DW_CREATED_TIME"},
+        {"name": "CHUNWO_DB.MFR.SUB_EMFR_CASHFLOW", "dw_created_time_column": "DW_CREATED_TIME"}
+      ]
+    }
+  ]
+}
