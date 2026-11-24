@@ -8,7 +8,7 @@ class Theme:
     key: str
     title: str
     product_badge: str
-    sidebar_labels: tuple[str, str, str, str, str]
+    sidebar_labels: tuple[str, str, str, str, str, str]
     css: str
 
 
@@ -183,6 +183,51 @@ div[class*="st-key-v2_run_"] .stButton button div, div[class*="st-key-v2_config_
 .st-key-v2_override {{ transform: translateY(-8px); }}
 .st-key-v2_override_reason {{ margin-top: -20px !important; }}
 .st-key-v2-run-controls .stButton button {{ min-height: 31px; border-radius: 5px; background: #197dcc; border-color: #197dcc; font-size: .67rem; }}
+/* Period Flow is a wider, read-only run-history matrix inside the existing v2 shell. */
+body:has(.st-key-v2-period-flow) .block-container {{ max-width: 1500px; padding: 30px 32px 32px; }}
+.st-key-v2-period-flow {{ margin-top: 8px; }}
+.st-key-v2-period-flow [data-testid="stMetricLabel"] {{ color: #647184 !important; }}
+.st-key-v2-period-flow [data-testid="stMetricValue"] {{ color: #17283b !important; }}
+.st-key-v2-period-flow [data-testid="stMetricDelta"] {{ color: #647184 !important; }}
+.mfr-flow-intro {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 8px 0 16px; }}
+.mfr-flow-overline {{ margin: 0 0 5px; color: #197dcc; font-size: .62rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }}
+.mfr-flow-description {{ margin: 0; color: #687489; font-size: .76rem; line-height: 1.5; }}
+.mfr-preview-label {{ display: inline-flex; align-items: center; flex: 0 0 auto; padding: 6px 9px; border: 1px solid #d5e5f4; border-radius: 999px; background: #eff7fd; color: #32658f; font-size: .6rem; font-weight: 700; letter-spacing: .045em; white-space: nowrap; }}
+.st-key-v2-period-flow [data-testid="stHorizontalBlock"] {{ align-items: stretch; }}
+.mfr-period-grid-header {{ margin: 8px 0 6px; padding: 0 9px; }}
+.mfr-period-heading {{ min-height: 35px; color: #647184; font-size: .59rem; line-height: 1.25; }}
+.mfr-period-heading-index {{ display: block; margin-bottom: 4px; color: #197dcc; font-size: .55rem; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }}
+.mfr-period-heading-name {{ display: block; color: #344256; font-size: .62rem; font-weight: 700; }}
+.st-key-v2-period-grid {{ overflow-x: auto; }}
+.st-key-v2-period-grid div[class*="st-key-v2-period-row-"] {{ margin-bottom: 8px; padding: 10px 9px 8px; border: 1px solid #dce3eb; border-radius: 9px; background: #fff; box-shadow: 0 2px 6px rgba(20, 33, 50, .035); }}
+.st-key-v2-period-grid div[class*="st-key-v2-period-row-"]:hover {{ border-color: #bdcfe0; box-shadow: 0 5px 14px rgba(20, 33, 50, .065); }}
+.st-key-v2-period-grid div[class*="st-key-v2-period-row-"] [data-testid="stHorizontalBlock"] {{ align-items: center; }}
+.mfr-period-month {{ margin: 0 0 3px; color: #17283b; font-size: .75rem; font-weight: 740; line-height: 1.25; }}
+.mfr-period-code {{ margin: 0 0 7px; color: #7a8797; font-size: .59rem; font-variant-numeric: tabular-nums; }}
+.mfr-period-updated {{ margin: 4px 0 0; color: #7a8797; font-size: .55rem; line-height: 1.35; }}
+.mfr-flow-pill {{ display: inline-flex; align-items: center; min-height: 20px; padding: 2px 7px; border-radius: 999px; font-size: .57rem; font-weight: 730; line-height: 1.2; white-space: nowrap; }}
+.mfr-flow-pill.success {{ color: #137546; background: #e8f5ed; }}
+.mfr-flow-pill.running {{ color: #176ead; background: #e8f3fb; }}
+.mfr-flow-pill.failed {{ color: #b8323d; background: #fdecee; }}
+.mfr-flow-pill.queued, .mfr-flow-pill.waiting {{ color: #667085; background: #f0f2f5; }}
+.mfr-flow-pill.template {{ color: #7051a2; background: #f1ecf8; }}
+.mfr-flow-detail {{ display: block; margin-top: 5px; color: #758194; font-size: .55rem; line-height: 1.35; overflow-wrap: anywhere; }}
+.st-key-v2-period-flow div[class*="st-key-v2_period_view_"] .stButton button, .st-key-v2-period-flow div[class*="st-key-v2_period_run_"] .stButton button {{ min-height: 27px; padding: .25rem .4rem; border: 1px solid #d4dfeb; border-radius: 6px; background: #f6f9fc; color: #31516f; font-size: .61rem; font-weight: 650; white-space: nowrap; box-shadow: none; }}
+.st-key-v2-period-flow div[class*="st-key-v2_period_view_"] .stButton button:hover, .st-key-v2-period-flow div[class*="st-key-v2_period_run_"] .stButton button:hover {{ border-color: #8eb6d8; background: #eef6fc; color: #176eae; }}
+.st-key-v2-period-flow div[class*="st-key-v2_period_run_"] .stButton button {{ border-color: #197dcc; background: #197dcc; color: #fff; }}
+.st-key-v2-period-flow div[class*="st-key-v2_period_run_"] .stButton button:hover {{ border-color: #0e66b3; background: #0e6fbe; color: #fff; }}
+.mfr-flow-legend {{ display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 12px 0 2px; color: #748093; font-size: .62rem; }}
+.mfr-flow-legend .mfr-flow-pill {{ margin-left: 3px; }}
+@media (max-width: 1100px) {{
+    body:has(.st-key-v2-period-flow) .block-container {{ padding: .8rem; }}
+    .st-key-v2-period-grid [data-testid="stHorizontalBlock"] {{ min-width: 700px; }}
+    .st-key-v2-period-grid .mfr-period-heading-name {{ font-size: .55rem; }}
+    .st-key-v2-period-grid .mfr-flow-pill {{ padding: 2px 5px; font-size: .51rem; }}
+    .st-key-v2-period-grid .mfr-flow-detail, .st-key-v2-period-grid .mfr-period-updated {{ font-size: .49rem; }}
+    .st-key-v2-period-flow div[class*="st-key-v2_period_view_"] .stButton button,
+    .st-key-v2-period-flow div[class*="st-key-v2_period_run_"] .stButton button {{ padding: .18rem .2rem; font-size: .53rem; }}
+    .mfr-flow-intro {{ flex-direction: column; gap: 8px; }}
+}}
 @media (max-width: 850px) {{ .mfr-shell {{ grid-template-columns: 1fr; }} .mfr-sidebar {{ display: none; }} .st-key-v2-sidebar {{ min-height: auto; height: auto; }} .mfr-bottom-grid {{ grid-template-columns: 1fr; }} .mfr-header {{ align-items: flex-start; flex-direction: column; }} .mfr-table-wrap {{ overflow-x: auto; }} .mfr-table {{ min-width: 760px; }} .block-container {{ padding: .7rem; }} }}
 </style>
 """
@@ -197,7 +242,7 @@ THEMES: dict[str, Theme] = {
         key="minimal",
         title="Pipelines Overview",
         product_badge="MFR monthly data workflows",
-        sidebar_labels=("Pipelines", "Scheduled Tasks", "Activity Logs", "Configuration", "Settings"),
+        sidebar_labels=("Period Flow", "Pipelines", "Scheduled Tasks", "Activity Logs", "Configuration", "Settings"),
         css=_css(
             ink="#17233b", muted="#687489", surface="#ffffff", canvas="#f6f7fa",
             sidebar="#172131", sidebar_active="#344258", accent="#197dcc", accent_ink="#ffffff",
@@ -209,7 +254,7 @@ THEMES: dict[str, Theme] = {
         key="snowflake",
         title="Pipelines Overview",
         product_badge="Data Pipelines Platform · winter blue style",
-        sidebar_labels=("Pipelines", "Scheduled Tasks", "Activity Logs", "Configuration", "Settings"),
+        sidebar_labels=("Period Flow", "Pipelines", "Scheduled Tasks", "Activity Logs", "Configuration", "Settings"),
         css=_css(
             ink="#113450", muted="#5d7890", surface="#ffffff", canvas="#edfaff",
             sidebar="#073f70", sidebar_active="#12a9da", accent="#12a9da", accent_ink="#ffffff",
@@ -221,7 +266,7 @@ THEMES: dict[str, Theme] = {
         key="databricks",
         title="Workflow Overview",
         product_badge="Workflow Orchestration · brick style",
-        sidebar_labels=("Workflows", "Jobs", "Job Runs", "Configuration", "Workflow Settings"),
+        sidebar_labels=("Period Flow", "Workflows", "Jobs", "Job Runs", "Configuration", "Workflow Settings"),
         css=_css(
             ink="#2b2527", muted="#776e70", surface="#ffffff", canvas="#fff8f5",
             sidebar="#142d31", sidebar_active="#344d50", accent="#d8493d", accent_ink="#ffffff",

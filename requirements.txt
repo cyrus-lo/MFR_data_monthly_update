@@ -1,5 +1,5 @@
 -r mfr_submission_check/requirements.txt
-streamlit>=1.38,<2
+streamlit>=1.60.0,<2
 pytest>=8,<9
 requests>=2.31,<3
 pycryptodome>=3.20,<4

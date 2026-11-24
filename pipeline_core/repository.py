@@ -19,6 +19,56 @@ def now_hkt() -> str:
     return datetime.now(HKT).isoformat(timespec="seconds")
 
 
+def read_period_flow_snapshot(path: Path | str) -> dict[str, list[dict[str, Any]]]:
+    """Read all run and step history for Period Flow without initializing or writing the DB."""
+    database_path = Path(path).resolve()
+    if not database_path.is_file():
+        raise FileNotFoundError(f"Pipeline database does not exist: {database_path}")
+
+    connection = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=10)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        required_tables = {"pipeline_runs", "step_runs"}
+        if not tables.intersection(required_tables):
+            connection.rollback()
+            return {"runs": [], "step_runs": []}
+        if not required_tables.issubset(tables):
+            raise sqlite3.OperationalError("Pipeline database schema is incomplete")
+        runs = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT pipeline_runs.*, pipeline_runs.rowid AS _row_order "
+                "FROM pipeline_runs "
+                "ORDER BY reporting_month DESC, created_at DESC, pipeline_runs.rowid DESC"
+            )
+        ]
+        step_runs = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT step_runs.*, pipeline_runs.reporting_month, pipeline_runs.target, "
+                "pipeline_runs.status AS run_status, pipeline_runs.created_at AS run_created_at, "
+                "pipeline_runs.started_at AS run_started_at, pipeline_runs.finished_at AS run_finished_at, "
+                "pipeline_runs.operator, pipeline_runs.summary AS run_summary, "
+                "pipeline_runs.rowid AS run_order, step_runs.rowid AS step_order "
+                "FROM step_runs JOIN pipeline_runs ON pipeline_runs.id = step_runs.run_id "
+                "ORDER BY pipeline_runs.reporting_month DESC, pipeline_runs.created_at DESC, "
+                "pipeline_runs.rowid DESC, step_runs.rowid DESC"
+            )
+        ]
+        connection.commit()
+        return {"runs": runs, "step_runs": step_runs}
+    finally:
+        connection.close()
+
+
 class RunRepository:
     def __init__(self, path: Path | str = Path("data/pipeline.db")) -> None:
         self.path = Path(path)

@@ -2,6 +2,17 @@
 
 This repository now contains the first implementation slice of the internal pipeline dashboard.
 
+## Python environment
+
+Use Python 3.10 or newer. From the repository root, create the project environment if needed (replace `3.12` with an installed Python 3.10+ version) and install the root requirements with that environment's interpreter:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+```
+
+After installing or updating dependencies, restart the running V1 and V2 dashboard processes so they load the updated packages. A dashboard-only Streamlit dependency change does not require restarting the worker.
+
 ## Run the dashboards
 
 The Streamlit interfaces queue and monitor work. Start **one** shared worker from the workspace root before using the dashboards when possible:

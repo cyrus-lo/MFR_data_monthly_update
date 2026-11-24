@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import calendar
+import html
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -19,7 +21,7 @@ from pipeline_core.project_selection import (  # noqa: E402
     parse_pasted_project_codes,
     validate_selected_project_codes,
 )
-from pipeline_core.repository import RunRepository, now_hkt  # noqa: E402
+from pipeline_core.repository import RunRepository, now_hkt, read_period_flow_snapshot  # noqa: E402
 from pipeline_core.step3_receipt import Step3ReceiptError, load_step3_upload_receipt  # noqa: E402
 from pipeline_core.step4_readiness import step4_readiness  # noqa: E402
 from pipeline_core.step3_sources import (  # noqa: E402
@@ -38,28 +40,39 @@ from pipeline_core.worker_health import worker_health  # noqa: E402
 from pipeline_core.worker_launcher import ensure_worker_running  # noqa: E402
 from web_app_v2.theme import THEMES  # noqa: E402
 from web_app_v2.view_models import (  # noqa: E402
+    PERIOD_FLOW_STEPS,
+    PeriodFlowRow,
+    PeriodFlowStepCell,
     PipelineRow,
     active_run_rows,
     build_pipeline_rows,
     format_timestamp,
     resolve_reporting_month,
+    build_period_flow_rows,
     status_details,
 )
 
 
 st.set_page_config(page_title="MFR Pipeline Dashboard v2", page_icon="◈", layout="wide")
 
-repo = RunRepository(ROOT / "data" / "pipeline.db")
 adapters = build_adapters()
 STEP_KEYS = tuple(adapters)
-NAVIGATION_KEYS = ("pipelines", "scheduled", "logs", "configuration", "settings")
+NAVIGATION_KEYS = ("period_flow", "pipelines", "scheduled", "logs", "configuration", "settings")
 NAVIGATION_ICONS = {
+    "period_flow": "▦",
     "pipelines": "◈",
     "scheduled": "◷",
     "logs": "≡",
     "configuration": "⌘",
     "settings": "⚙",
 }
+
+
+@st.cache_resource
+def get_repo() -> RunRepository:
+    """Create the shared repository only for functional dashboard views."""
+    return RunRepository(ROOT / "data" / "pipeline.db")
+
 
 if st.session_state.get("v2_interface_style") == "Minimal":
     st.session_state.v2_interface_style = "Default"
@@ -71,8 +84,12 @@ if "v2_applied_interface_style" not in st.session_state:
     st.session_state.v2_applied_interface_style = st.session_state.v2_interface_style
 if "v2_dialog" not in st.session_state:
     st.session_state.v2_dialog = None
+if "v2_period_dialog" not in st.session_state:
+    st.session_state.v2_period_dialog = None
 if "v2_view" not in st.session_state:
-    st.session_state.v2_view = "pipelines"
+    st.session_state.v2_view = "period_flow"
+if st.session_state.v2_view not in NAVIGATION_KEYS:
+    st.session_state.v2_view = "period_flow"
 
 
 def notify(message: str, icon: str = "✅") -> None:
@@ -81,7 +98,86 @@ def notify(message: str, icon: str = "✅") -> None:
 
 def set_view(view: str) -> None:
     st.session_state.v2_view = view
+    st.session_state.v2_period_dialog = None
 
+
+def clear_period_dialog() -> None:
+    st.session_state.v2_period_dialog = None
+
+
+@st.dialog("Reporting period details", width="large", on_dismiss=clear_period_dialog)
+def show_period_run_details_dialog(row: PeriodFlowRow) -> None:
+    st.caption(f"Reporting period · {row.month_label} ({row.reporting_month})")
+    st.caption("Each step below reflects its latest recorded result for this month; results may come from different runs.")
+    st.caption(
+        f"Latest run: {row.latest_run.run_id} · {row.latest_run.target} · {row.latest_run.status}. "
+        "A run without a step record does not change the matrix status."
+    )
+    st.dataframe(
+        [
+            {
+                "Workflow step": label,
+                "Status": cell.status,
+                "Source run": cell.run_id or "—",
+                "Run status": cell.run_status or "—",
+                "Updated": cell.timestamp or "—",
+                "Message": cell.message or cell.detail,
+            }
+            for (_, _, label), cell in zip(PERIOD_FLOW_STEPS, row.steps)
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    st.markdown("**Runs for this reporting month**")
+    st.dataframe(
+        [
+            {
+                "Run ID": run.run_id,
+                "Target": run.target,
+                "Status": run.status,
+                "Operator": run.operator or "—",
+                "Created": run.created_at or "—",
+                "Started": run.started_at or "—",
+                "Finished": run.finished_at or "—",
+                "Summary": run.summary or "—",
+            }
+            for run in row.runs
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    if st.button("Close", key=f"v2_period_details_close_{row.reporting_month}"):
+        clear_period_dialog()
+        st.rerun()
+
+@st.dialog("Run workflow · preview", on_dismiss=clear_period_dialog)
+def show_period_run_preview_dialog(row: PeriodFlowRow) -> None:
+    st.caption(f"Selected reporting period · {row.month_label} ({row.reporting_month})")
+    st.warning(
+        "Preview only. No workflow will be queued, no worker will be started, and the shared database will not be changed."
+    )
+    st.markdown(f"This row's action is bound to reporting month **{row.reporting_month}**.")
+    st.write("The production Run All sequence currently covers Steps 1–3; this preview does not execute it.")
+    if st.button("Close", key=f"v2_period_run_close_{row.reporting_month}"):
+        clear_period_dialog()
+        st.rerun()
+
+
+def display_period_dialog(rows: tuple[PeriodFlowRow, ...]) -> None:
+    dialog = st.session_state.get("v2_period_dialog")
+    if not dialog:
+        return
+    action, reporting_month = dialog
+    row = next((candidate for candidate in rows if candidate.reporting_month == reporting_month), None)
+    if not row:
+        clear_period_dialog()
+        return
+    if action == "details":
+        show_period_run_details_dialog(row)
+    elif action == "run_preview":
+        show_period_run_preview_dialog(row)
+    else:
+        clear_period_dialog()
 
 def status_markup(label: str, tone: str, icon: str) -> str:
     spinner = " mfr-spinner" if label in {"Running", "Queued", "Cancelling"} else ""
@@ -126,7 +222,7 @@ def queue_run(
             else:
                 st.info(worker_start.message)
     try:
-        run_id = repo.create_run(
+        run_id = get_repo().create_run(
             reporting_month,
             target,
             operator,
@@ -146,7 +242,7 @@ def queue_run(
 
 def confirmed_project_codes(reporting_month: str) -> list[str]:
     """Return projects confirmed ready by the latest successful Step 1 run."""
-    step_1_run = repo.latest_successful_step_run(reporting_month, "submission_check")
+    step_1_run = get_repo().latest_successful_step_run(reporting_month, "submission_check")
     if not step_1_run:
         raise ProjectSelectionError("Run Step 1 successfully for this reporting month before choosing project files")
     manifest = ROOT / "run_logs" / reporting_month / step_1_run["id"] / "artifacts" / "project_manifest.json"
@@ -259,7 +355,7 @@ def show_delete_dialog(row: PipelineRow) -> None:
 @st.dialog("Review Step 2 files before Step 3")
 def show_snowflake_upload_dialog() -> None:
     reporting_month = st.session_state["v2_reporting_month"]
-    preview = latest_preparation_preview(repo, ROOT, reporting_month)
+    preview = latest_preparation_preview(get_repo(), ROOT, reporting_month)
     if preview.rows:
         st.dataframe(
             [{field: row.get(field, "") for field in ("timestamp_hkt", "filename", "status")} for row in preview.rows],
@@ -328,7 +424,7 @@ def show_snowflake_task_dialog() -> None:
     readiness = step4_readiness(ROOT)
     health = worker_health(ROOT)
     worker_ready = health.state == "running"
-    latest_step3 = repo.latest_successful_step_run(reporting_month, "snowflake_upload")
+    latest_step3 = get_repo().latest_successful_step_run(reporting_month, "snowflake_upload")
     if not latest_step3:
         st.warning(f"No successful Step 3 upload exists for {reporting_month}.")
         st.caption("Run Step 3 successfully for this reporting month before triggering the Snowflake task.")
@@ -342,7 +438,7 @@ def show_snowflake_task_dialog() -> None:
         st.caption(health.message)
     else:
         st.warning(health.message + " Start the shared worker before queueing Step 4.")
-    latest_step4 = repo.latest_step_run(reporting_month, "snowflake_task")
+    latest_step4 = get_repo().latest_step_run(reporting_month, "snowflake_task")
     if latest_step4:
         label, _, _ = status_details(latest_step4.get("step_status"))
         st.caption(f"Latest Step 4 result: {label} · {latest_step4.get('message') or latest_step4.get('summary')}")
@@ -392,7 +488,7 @@ def show_snowflake_task_dialog() -> None:
 def show_risk_check_dialog() -> None:
     reporting_month = st.session_state["v2_reporting_month"]
     risk_dir = ROOT / "mfr_risk_check" / "MFR_vs_Risk_calculation" / "Risk_calculation_files"
-    latest_step3 = repo.latest_successful_step_run(reporting_month, "snowflake_upload")
+    latest_step3 = get_repo().latest_successful_step_run(reporting_month, "snowflake_upload")
     source_plan = None
 
     st.info(
@@ -512,7 +608,7 @@ def display_dialog(rows: list[PipelineRow]) -> None:
 
 
 def render_controls() -> None:
-    decision = resolve_reporting_month(repo.dashboard_snapshot(STEP_KEYS), date.today())
+    decision = resolve_reporting_month(get_repo().dashboard_snapshot(STEP_KEYS), date.today())
     if decision.error:
         st.error(decision.error)
     elif decision.reason:
@@ -712,9 +808,123 @@ def render_system_status(snapshot: dict[str, object]) -> None:
             st.warning(health.message)
 
 
+PERIOD_FLOW_COLUMN_WIDTHS = [1.48, 1, 1, 1, 1, 1, 1, 1.05]
+
+
+def period_step_markup(cell: PeriodFlowStepCell) -> str:
+    return (
+        '<div class="mfr-period-step-cell">'
+        f'<span class="mfr-flow-pill {html.escape(cell.tone, quote=True)}">{html.escape(cell.status)}</span>'
+        f'<span class="mfr-flow-detail">{html.escape(cell.detail)}</span>'
+        "</div>"
+    )
+
+
+@st.fragment(run_every=10)
+def render_period_flow_preview() -> None:
+    """Render the real, read-only reporting-period history from the shared database."""
+    try:
+        snapshot = read_period_flow_snapshot(ROOT / "data" / "pipeline.db")
+        all_rows = build_period_flow_rows(snapshot)
+    except FileNotFoundError:
+        all_rows = ()
+        read_error = "The shared pipeline database has not been created yet."
+    except sqlite3.Error:
+        all_rows = ()
+        read_error = "The shared pipeline database could not be read. Check the application logs or database availability."
+    else:
+        read_error = ""
+
+    with st.container(key="v2-period-flow"):
+        st.markdown(
+            '<div class="mfr-flow-intro">'
+            '<div><p class="mfr-flow-overline">Period overview</p>'
+            '<p class="mfr-flow-description">One row per reporting month. Each step shows its latest recorded result and source run.</p></div>'
+            '<span class="mfr-preview-label">READ-ONLY HISTORY</span>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        metrics = (
+            ("Reporting periods", len(all_rows)),
+            ("Runs in view", sum(len(row.runs) for row in all_rows)),
+            ("Active runs", sum(
+                run.status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}
+                for row in all_rows for run in row.runs
+            )),
+        )
+        metric_columns = st.columns(3, gap="small")
+        for column, (label, value) in zip(metric_columns, metrics):
+            with column:
+                with st.container(border=True):
+                    st.metric(label, value)
+
+        st.caption("Read-only shared run history. Per-step results may come from different runs; no workflow is queued from this view.")
+        header_columns = st.columns(PERIOD_FLOW_COLUMN_WIDTHS, gap="small")
+        with header_columns[0]:
+            st.markdown(
+                '<div class="mfr-period-heading"><span class="mfr-period-heading-index">REPORTING MONTH</span>'
+                '<span class="mfr-period-heading-name">Latest run</span></div>',
+                unsafe_allow_html=True,
+            )
+        for column, (_, step_number, step_name) in zip(header_columns[1:7], PERIOD_FLOW_STEPS):
+            with column:
+                st.markdown(
+                    '<div class="mfr-period-heading">'
+                    f'<span class="mfr-period-heading-index">{step_number}</span>'
+                    f'<span class="mfr-period-heading-name">{step_name}</span>'
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+        with header_columns[7]:
+            st.markdown('<div class="mfr-period-heading"><span class="mfr-period-heading-index">ACTIONS</span></div>', unsafe_allow_html=True)
+
+        with st.container(key="v2-period-grid"):
+            if read_error:
+                st.warning(read_error)
+            elif not all_rows:
+                st.info("No reporting-month runs have been recorded yet.")
+            for row in all_rows:
+                with st.container(key=f"v2-period-row-{row.reporting_month}", border=True):
+                    row_columns = st.columns(PERIOD_FLOW_COLUMN_WIDTHS, gap="small")
+                    with row_columns[0]:
+                        latest_run = row.latest_run
+                        latest_label, latest_tone, _ = status_details(latest_run.status)
+                        st.markdown(
+                            f'<p class="mfr-period-month">{html.escape(row.month_label)}</p>'
+                            f'<p class="mfr-period-code">{html.escape(row.reporting_month)}</p>'
+                            f'<span class="mfr-flow-pill {html.escape(latest_tone, quote=True)}">{html.escape(latest_label)}</span>'
+                            f'<p class="mfr-period-updated">Run {html.escape(latest_run.run_id[:8])}<br>{html.escape(latest_run.target)}</p>'
+                            f'<p class="mfr-period-updated">Updated<br>{html.escape(row.updated)}</p>',
+                            unsafe_allow_html=True,
+                        )
+                    for column, cell in zip(row_columns[1:7], row.steps):
+                        with column:
+                            st.markdown(period_step_markup(cell), unsafe_allow_html=True)
+                    with row_columns[7]:
+                        if st.button(
+                            "View details",
+                            key=f"v2_period_view_{row.reporting_month}",
+                            help="View the latest recorded result for each step and all runs for this reporting month.",
+                            width="stretch",
+                        ):
+                            st.session_state.v2_period_dialog = ("details", row.reporting_month)
+                        if st.button(
+                            "Run",
+                            key=f"v2_period_run_{row.reporting_month}",
+                            help=f"Preview only. No workflow will be queued for {row.reporting_month}.",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            st.session_state.v2_period_dialog = ("run_preview", row.reporting_month)
+
+        st.caption("Step 5 is a not-configured template. Steps without a recorded result are shown as Not started.")
+    display_period_dialog(all_rows)
+
+
 def render_logs() -> None:
     st.markdown("#### Activity Logs")
-    history = repo.list_recent_step_runs(100)
+    history = get_repo().list_recent_step_runs(100)
     if history:
         st.dataframe(history, use_container_width=True, hide_index=True)
     else:
@@ -787,7 +997,7 @@ def render_live_page(view: str) -> None:
     if view == "pipelines":
         render_controls()
     selected_month = st.session_state.get("v2_reporting_month")
-    snapshot = repo.dashboard_snapshot(STEP_KEYS, reporting_month=selected_month)
+    snapshot = get_repo().dashboard_snapshot(STEP_KEYS, reporting_month=selected_month)
     if selected_month:
         snapshot["reporting_month"] = selected_month
     rows = build_pipeline_rows(adapters, snapshot)
@@ -812,7 +1022,8 @@ def render_live_page(view: str) -> None:
 theme = THEMES[st.session_state.v2_interface_style]
 st.markdown(theme.css, unsafe_allow_html=True)
 
-left_sidebar, content = st.columns([1, 4.25], gap="small")
+is_period_flow = st.session_state.v2_view == "period_flow"
+left_sidebar, content = st.columns([0.75, 4.25] if is_period_flow else [1, 4.25], gap="small")
 with left_sidebar:
     with st.container(key="v2-sidebar"):
         st.markdown(f'<div class="mfr-brand"><span class="mfr-brand-mark">◈</span><span>{"MFR Workflows" if theme.key == "databricks" else "MFR Pipelines"}</span></div>', unsafe_allow_html=True)
@@ -831,14 +1042,32 @@ with left_sidebar:
         st.markdown('<div class="mfr-sidebar-footer">v2 · shared data with v1</div>', unsafe_allow_html=True)
 
 with content:
-    title_column, badge_column, new_column, search_column = st.columns([2.5, .05, 1.15, 1.35])
+    if is_period_flow:
+        title_column, badge_column = st.columns([2.85, .05])
+        new_column = search_column = None
+    else:
+        title_column, badge_column, new_column, search_column = st.columns([2.5, .05, 1.15, 1.35])
     with title_column:
-        st.markdown(f'<h1 class="mfr-heading">{theme.title}</h1><p class="mfr-subheading">Run and monitor MFR data workflows</p>', unsafe_allow_html=True)
+        page_title = "Period flow" if is_period_flow else theme.title
+        page_subtitle = (
+            "Monthly reporting status across the six MFR workflow steps"
+            if is_period_flow
+            else "Run and monitor MFR data workflows"
+        )
+        st.markdown(
+            f'<h1 class="mfr-heading">{page_title}</h1><p class="mfr-subheading">{page_subtitle}</p>',
+            unsafe_allow_html=True,
+        )
     with badge_column:
         st.markdown(f'<span class="mfr-badge"><span class="mfr-badge-mark">◈</span>{theme.product_badge}</span>', unsafe_allow_html=True)
-    with new_column:
-        if st.button("＋ New Pipeline", key="v2_new_pipeline", use_container_width=True):
-            notify("Pipeline creation is a visual prototype; the four MFR stages remain fixed.", "ℹ️")
-    with search_column:
-        st.text_input("Search", key="v2_search", placeholder="Search pipeline")
-    render_live_page(st.session_state.v2_view)
+    if new_column is not None:
+        with new_column:
+            if st.button("＋ New Pipeline", key="v2_new_pipeline", use_container_width=True):
+                notify("Pipeline creation is a visual prototype; the four MFR stages remain fixed.", "ℹ️")
+    if search_column is not None:
+        with search_column:
+            st.text_input("Search", key="v2_search", placeholder="Search pipeline")
+    if is_period_flow:
+        render_period_flow_preview()
+    else:
+        render_live_page(st.session_state.v2_view)

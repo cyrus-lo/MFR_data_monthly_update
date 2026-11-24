@@ -1,10 +1,72 @@
 from datetime import date
+import sqlite3
 from pathlib import Path
+
+from streamlit.testing.v1 import AppTest
 
 from pipeline_core.adapters import build_adapters
 from pipeline_core.models import RunStatus, StepStatus
-from pipeline_core.repository import RunRepository
-from web_app_v2.view_models import build_pipeline_rows, resolve_reporting_month
+from pipeline_core.repository import RunRepository, read_period_flow_snapshot
+from web_app_v2.view_models import (
+    PERIOD_FLOW_STEPS,
+    build_period_flow_rows,
+    build_pipeline_rows,
+    resolve_reporting_month,
+)
+import pipeline_core.repository as repository_module
+
+
+class _AppTestRepository:
+    def __init__(self, _path: Path) -> None:
+        pass
+
+    def dashboard_snapshot(self, _step_keys: tuple[str, ...], reporting_month: str | None = None) -> dict[str, object]:
+        del reporting_month
+        return {
+            "runs": [],
+            "active_runs": [],
+            "step_runs": [],
+            "schedule": {"enabled": False},
+        }
+
+    def latest_successful_step_run(self, _reporting_month: str, _step_key: str) -> None:
+        return None
+
+
+def _run_v2_app(monkeypatch, view: str, period_snapshot: dict[str, list[dict[str, object]]] | None = None) -> AppTest:
+    monkeypatch.setattr(repository_module, "RunRepository", _AppTestRepository)
+    monkeypatch.setattr(
+        repository_module,
+        "read_period_flow_snapshot",
+        lambda _path: period_snapshot or {"runs": [], "step_runs": []},
+    )
+    app_path = Path(__file__).resolve().parents[1] / "web_app_v2" / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=10)
+    app.session_state["v2_view"] = view
+    return app.run()
+
+
+def test_v2_step3_dialog_handles_missing_step2_run(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "RunRepository", _AppTestRepository)
+    monkeypatch.setattr(
+        repository_module,
+        "read_period_flow_snapshot",
+        lambda _path: {"runs": [], "step_runs": []},
+    )
+    app_path = Path(__file__).resolve().parents[1] / "web_app_v2" / "app.py"
+    app = AppTest.from_file(str(app_path), default_timeout=10)
+    app.session_state["v2_view"] = "pipelines"
+    app.session_state["v2_reporting_month"] = "2026-11"
+    app.session_state["v2_dialog"] = ("snowflake_upload", "snowflake_upload")
+
+    app.run()
+
+    assert not app.exception
+    assert any(
+        "No successful Step 2 run exists for this reporting month." in element.value
+        for element in app.warning
+    )
+    assert all(button.key != "v2_upload_latest" for button in app.button)
 
 
 def test_v2_uses_vertical_button_tabs_and_settings_color_theme() -> None:
@@ -12,7 +74,8 @@ def test_v2_uses_vertical_button_tabs_and_settings_color_theme() -> None:
     source = app_file.read_text(encoding="utf-8")
 
     assert "st.radio(" not in source
-    assert 'NAVIGATION_KEYS = ("pipelines", "scheduled", "logs", "configuration", "settings")' in source
+    assert 'NAVIGATION_KEYS = ("period_flow", "pipelines", "scheduled", "logs", "configuration", "settings")' in source
+    assert 'st.session_state.v2_view = "period_flow"' in source
     assert 'st.selectbox(\n                "Color Theme"' in source
     assert 'st.session_state.v2_interface_style = "Default"' in source
     assert 'st.session_state.get("v2_interface_style") == "Minimal"' in source
@@ -23,6 +86,237 @@ def test_v2_uses_vertical_button_tabs_and_settings_color_theme() -> None:
     assert 'elif view == "scheduled":' in source
     assert 'render_scheduled(snapshot)' in source
     assert 'st-key-v2-sidebar' in (Path(__file__).resolve().parents[1] / "web_app_v2" / "theme.py").read_text(encoding="utf-8")
+
+
+def test_period_flow_rows_use_latest_step_status_per_month_and_include_source_runs(tmp_path: Path) -> None:
+    repo = RunRepository(tmp_path / "pipeline.db")
+    first_run = repo.create_run("2026-10", "ALL", "October operator")
+    assert repo.claim_next() is not None
+    repo.upsert_step(first_run, "submission_check", StepStatus.SUCCEEDED, message="First success")
+    repo.upsert_step(first_run, "excel_download", StepStatus.SUCCEEDED, message="Downloaded")
+    repo.set_status(first_run, RunStatus.SUCCEEDED, "Run All completed", finished=True)
+
+    rerun_id = repo.create_run("2026-10", "submission_check", "Rerun operator")
+    assert repo.claim_next() is not None
+    repo.upsert_step(rerun_id, "submission_check", StepStatus.FAILED, message="Latest attempt failed")
+    repo.set_status(rerun_id, RunStatus.FAILED, "Submission check failed", finished=True)
+
+    rows = build_period_flow_rows(read_period_flow_snapshot(repo.path))
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert len(PERIOD_FLOW_STEPS) == 6
+    assert len(row.steps) == len(PERIOD_FLOW_STEPS)
+    assert row.reporting_month == "2026-10"
+    assert row.steps[0].status == "Failed"
+    assert row.steps[0].run_id == rerun_id
+    assert row.steps[0].message == "Latest attempt failed"
+    assert row.steps[1].status == "Success"
+    assert row.steps[1].run_id == first_run
+    assert row.steps[2].status == "Not started"
+    assert row.steps[4].status == "Template"
+    assert row.steps[4].tone == "template"
+    assert {run.run_id for run in row.runs} == {first_run, rerun_id}
+    assert row.latest_run.run_id == rerun_id
+
+
+def test_period_flow_new_queued_standalone_run_does_not_replace_latest_recorded_step(tmp_path: Path) -> None:
+    repo = RunRepository(tmp_path / "pipeline.db")
+    completed_id = repo.create_run("2026-10", "snowflake_upload", "Operator")
+    assert repo.claim_next() is not None
+    repo.upsert_step(completed_id, "snowflake_upload", StepStatus.SUCCEEDED, message="Uploaded")
+    repo.set_status(completed_id, RunStatus.SUCCEEDED, "Upload complete", finished=True)
+
+    queued_id = repo.create_run("2026-10", "snowflake_upload", "Operator", allow_rerun=True, override_reason="Retry")
+
+    row = build_period_flow_rows(read_period_flow_snapshot(repo.path))[0]
+
+    assert row.steps[2].status == "Success"
+    assert row.steps[2].run_id == completed_id
+    assert row.latest_run.run_id == queued_id
+
+
+def test_period_flow_queued_all_run_does_not_invent_step_statuses(tmp_path: Path) -> None:
+    repo = RunRepository(tmp_path / "pipeline.db")
+    queued_id = repo.create_run("2026-10", "ALL", "Operator")
+
+    row = build_period_flow_rows(read_period_flow_snapshot(repo.path))[0]
+
+    assert all(step.status == "Not started" for step in row.steps if step.step_key != "risk_sync")
+    assert all(step.run_id is None for step in row.steps if step.step_key != "risk_sync")
+    assert row.latest_run.run_id == queued_id
+    assert row.latest_run.status == "QUEUED"
+
+
+def test_period_flow_snapshot_is_read_only_and_not_capped_at_200_runs(tmp_path: Path) -> None:
+    repo = RunRepository(tmp_path / "pipeline.db")
+    for index in range(205):
+        year, month = divmod(index, 12)
+        reporting_month = f"{2000 + year:04d}-{month + 1:02d}"
+        run_id = repo.create_run(reporting_month, "submission_check", "History test")
+        assert repo.claim_next() is not None
+        repo.set_status(run_id, RunStatus.FAILED, "Seeded history", finished=True)
+
+    before_bytes = repo.path.read_bytes()
+    snapshot = read_period_flow_snapshot(repo.path)
+    after_bytes = repo.path.read_bytes()
+    rows = build_period_flow_rows(snapshot)
+
+    assert len(snapshot["runs"]) == 205
+    assert len(rows) == 205
+    assert before_bytes == after_bytes
+
+
+def test_period_flow_snapshot_returns_empty_for_uninitialized_database(tmp_path: Path) -> None:
+    database_path = tmp_path / "empty.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+    before_bytes = database_path.read_bytes()
+
+    assert read_period_flow_snapshot(database_path) == {"runs": [], "step_runs": []}
+    assert database_path.read_bytes() == before_bytes
+
+
+def test_period_flow_rows_order_mixed_timezone_timestamps_by_instant() -> None:
+    snapshot = {
+        "runs": [
+            {"id": "earlier", "reporting_month": "2026-10", "target": "ALL", "status": "SUCCEEDED",
+             "created_at": "2026-10-01T10:00:00+08:00", "_row_order": 2},
+            {"id": "later", "reporting_month": "2026-10", "target": "ALL", "status": "RUNNING",
+             "created_at": "2026-10-01T02:00:00.500000Z", "_row_order": 1},
+        ],
+        "step_runs": [
+            {"run_id": "earlier", "reporting_month": "2026-10", "step_key": "submission_check",
+             "step_status": "SUCCEEDED", "run_status": "SUCCEEDED",
+             "run_created_at": "2026-10-01T10:00:00+08:00", "run_order": 2, "step_order": 1,
+             "step_finished_at": "2026-10-01T10:00:00+08:00"},
+            {"run_id": "later", "reporting_month": "2026-10", "step_key": "submission_check",
+             "step_status": "FAILED", "run_status": "FAILED",
+             "run_created_at": "2026-10-01T02:00:00.500000Z", "run_order": 1, "step_order": 1,
+             "step_finished_at": "2026-10-01T02:00:00.500000Z"},
+        ],
+    }
+
+    row = build_period_flow_rows(snapshot)[0]
+
+    assert row.latest_run.run_id == "later"
+    assert row.steps[0].run_id == "later"
+    assert row.steps[0].status == "Failed"
+    assert row.updated == "2026-10-01 02:00:00.500000Z"
+
+
+def test_period_flow_uses_read_only_history_and_does_not_queue_workflows() -> None:
+    app_source = (Path(__file__).resolve().parents[1] / "web_app_v2" / "app.py").read_text(encoding="utf-8")
+    render_start = app_source.index("def render_period_flow_preview")
+    render_end = app_source.index("def render_logs", render_start)
+    render_source = app_source[render_start:render_end]
+    run_dialog_start = app_source.index("def show_period_run_preview_dialog")
+    run_dialog_end = app_source.index("def status_markup", run_dialog_start)
+    run_dialog_source = app_source[run_dialog_start:run_dialog_end]
+    theme_source = (Path(__file__).resolve().parents[1] / "web_app_v2" / "theme.py").read_text(encoding="utf-8")
+
+    assert "read_period_flow_snapshot(" in render_source
+    assert "build_period_flow_rows(snapshot)" in render_source
+    assert "sample_period_flow_rows" not in app_source
+    assert 'st.session_state.v2_period_dialog = ("run_preview", row.reporting_month)' in render_source
+    assert 'st.session_state.v2_period_dialog = ("details", row.reporting_month)' in render_source
+    assert "display_period_dialog(all_rows)" in render_source
+    assert "queue_run(" not in render_source
+    assert "ensure_worker_running(" not in render_source
+    assert "row.reporting_month" in run_dialog_source
+    assert "queue_run(" not in run_dialog_source
+    assert "Create period" not in app_source
+    assert "v2_create_period" not in theme_source
+
+
+def test_period_flow_dialogs_survive_fragment_refresh_and_use_stretch_tables() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_source = (root / "web_app_v2" / "app.py").read_text(encoding="utf-8")
+    theme_source = (root / "web_app_v2" / "theme.py").read_text(encoding="utf-8")
+
+    assert 'st.session_state.v2_period_dialog = None' in app_source
+    assert '@st.dialog("Reporting period details", width="large", on_dismiss=clear_period_dialog)' in app_source
+    assert '@st.dialog("Run workflow · preview", on_dismiss=clear_period_dialog)' in app_source
+    assert 'st.session_state.v2_period_dialog = ("details", row.reporting_month)' in app_source
+    assert 'st.session_state.v2_period_dialog = ("run_preview", row.reporting_month)' in app_source
+    assert 'display_period_dialog(all_rows)' in app_source
+    assert app_source.count('width="stretch",\n        hide_index=True,') == 2
+    assert ".st-key-v2_search [data-testid=\"stWidgetLabel\"]" in theme_source
+
+
+def test_period_flow_renders_all_months_with_missing_step_runs_and_no_search(monkeypatch) -> None:
+    snapshot = {
+        "runs": [
+            {
+                "id": "october-run",
+                "reporting_month": "2026-10",
+                "target": "ALL",
+                "status": "SUCCEEDED",
+                "operator": "AppTest",
+                "created_at": "2026-10-15T10:00:00+08:00",
+                "started_at": "2026-10-15T10:01:00+08:00",
+                "finished_at": "2026-10-15T10:02:00+08:00",
+                "summary": "Completed",
+            },
+            {
+                "id": "november-run",
+                "reporting_month": "2026-11",
+                "target": "ALL",
+                "status": "QUEUED",
+                "operator": "AppTest",
+                "created_at": "2026-11-15T10:00:00+08:00",
+                "started_at": None,
+                "finished_at": None,
+                "summary": "",
+            },
+        ],
+        "step_runs": [],
+    }
+
+    app = _run_v2_app(monkeypatch, "period_flow", snapshot)
+
+    assert not app.exception
+    assert {button.key for button in app.button} >= {
+        "v2_period_view_2026-10",
+        "v2_period_view_2026-11",
+    }
+    rendered_markdown = "\n".join(element.value for element in app.markdown)
+    assert "October 2026" in rendered_markdown
+    assert "November 2026" in rendered_markdown
+    assert "Not started" in rendered_markdown
+    assert "Template" in rendered_markdown
+    assert all(widget.key != "v2_period_search" for widget in app.text_input)
+
+    app.button(key="v2_period_view_2026-10").click().run()
+    assert app.session_state["v2_period_dialog"] == ("details", "2026-10")
+    app.button(key="v2_period_details_close_2026-10").click().run()
+    assert app.session_state["v2_period_dialog"] is None
+
+    app.button(key="v2_period_run_2026-10").click().run()
+    assert app.session_state["v2_period_dialog"] == ("run_preview", "2026-10")
+    assert not app.exception
+
+
+def test_pipelines_search_still_filters_matching_and_nonmatching_rows(monkeypatch) -> None:
+    app = _run_v2_app(monkeypatch, "pipelines")
+    assert not app.exception
+
+    app.text_input(key="v2_search").set_value("risk_check").run()
+    assert not app.exception
+    visible_run_buttons = {
+        button.key for button in app.button
+        if button.key and button.key.startswith("v2_run_")
+    }
+    assert visible_run_buttons == {"v2_run_risk_check"}
+
+    app.text_input(key="v2_search").set_value("no-such-pipeline").run()
+    assert not app.exception
+    visible_run_buttons = {
+        button.key for button in app.button
+        if button.key and button.key.startswith("v2_run_")
+    }
+    assert not visible_run_buttons
+    assert any("No pipelines match the current search." in element.value for element in app.info)
 
 
 def test_both_dashboards_preview_step3_before_queueing() -> None:

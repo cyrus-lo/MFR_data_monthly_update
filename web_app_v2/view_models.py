@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
+import calendar
+import re
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -128,6 +130,166 @@ class PipelineRow:
     last_run: str
     active_run_id: str | None = None
     active_status: str | None = None
+
+
+@dataclass(frozen=True)
+class PeriodFlowRun:
+    run_id: str
+    target: str
+    status: str
+    operator: str
+    created_at: str
+    started_at: str
+    finished_at: str
+    summary: str
+
+
+@dataclass(frozen=True)
+class PeriodFlowStepCell:
+    step_key: str
+    status: str
+    tone: str
+    detail: str
+    run_id: str | None = None
+    run_status: str | None = None
+    message: str = ""
+    timestamp: str = ""
+
+
+@dataclass(frozen=True)
+class PeriodFlowRow:
+    reporting_month: str
+    month_label: str
+    updated: str
+    latest_run: PeriodFlowRun
+    runs: tuple[PeriodFlowRun, ...]
+    steps: tuple[PeriodFlowStepCell, ...]
+
+
+PERIOD_FLOW_STEPS: tuple[tuple[str, str, str], ...] = (
+    ("submission_check", "Step 1", "Check submission"),
+    ("excel_download", "Step 2", "Download Excel files"),
+    ("snowflake_upload", "Step 3", "Upload to Snowflake"),
+    ("snowflake_task", "Step 4", "Snowflake task"),
+    ("risk_sync", "Step 5", "Sync Risk DB"),
+    ("risk_check", "Step 6", "Compare MFR and Risk"),
+)
+
+
+def _timestamp_sort_key(value: Any) -> datetime:
+    """Normalize persisted ISO timestamps to comparable instants."""
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        timestamp = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone(timedelta(hours=8)))
+    return timestamp.astimezone(timezone.utc)
+
+
+def build_period_flow_rows(snapshot: dict[str, Any]) -> tuple[PeriodFlowRow, ...]:
+    """Project all persisted runs into month rows with the latest evidence per step."""
+    runs_by_month: dict[str, list[dict[str, Any]]] = {}
+    steps_by_month_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for run in snapshot.get("runs", []):
+        month = str(run.get("reporting_month") or "").strip()
+        if month:
+            runs_by_month.setdefault(month, []).append(run)
+    for step in snapshot.get("step_runs", []):
+        month = str(step.get("reporting_month") or "").strip()
+        step_key = str(step.get("step_key") or "")
+        if month and step_key:
+            steps_by_month_key.setdefault((month, step_key), []).append(step)
+
+    def run_order(run: dict[str, Any]) -> tuple[datetime, int]:
+        return (_timestamp_sort_key(run.get("created_at")), int(run.get("_row_order") or 0))
+
+    def step_order(step: dict[str, Any]) -> tuple[datetime, int, int]:
+        return (
+            _timestamp_sort_key(step.get("run_created_at")),
+            int(step.get("run_order") or 0),
+            int(step.get("step_order") or step.get("id") or 0),
+        )
+
+    def as_run(run: dict[str, Any]) -> PeriodFlowRun:
+        return PeriodFlowRun(
+            run_id=str(run.get("id") or ""),
+            target=str(run.get("target") or ""),
+            status=str(run.get("status") or ""),
+            operator=str(run.get("operator") or ""),
+            created_at=format_timestamp(run.get("created_at")),
+            started_at=format_timestamp(run.get("started_at")),
+            finished_at=format_timestamp(run.get("finished_at")),
+            summary=str(run.get("summary") or ""),
+        )
+
+    rows: list[PeriodFlowRow] = []
+    for month, month_runs in runs_by_month.items():
+        ordered_runs = sorted(month_runs, key=run_order, reverse=True)
+        month_step_cells: list[PeriodFlowStepCell] = []
+        timestamps = [
+            str(value)
+            for run in month_runs
+            for value in (run.get("created_at"), run.get("started_at"), run.get("finished_at"))
+            if value
+        ]
+
+        for step_key, _, step_name in PERIOD_FLOW_STEPS:
+            if step_key == "risk_sync":
+                month_step_cells.append(
+                    PeriodFlowStepCell(step_key, "Template", "template", "Not configured")
+                )
+                continue
+
+            step_records = steps_by_month_key.get((month, step_key), [])
+            latest_step = max(step_records, key=step_order, default=None)
+            if latest_step:
+                status = str(latest_step.get("step_status") or latest_step.get("status") or "")
+                label, tone, _ = status_details(status)
+                step_timestamp = (
+                    latest_step.get("step_finished_at")
+                    or latest_step.get("finished_at")
+                    or latest_step.get("step_started_at")
+                    or latest_step.get("started_at")
+                    or latest_step.get("run_created_at")
+                    or ""
+                )
+                detail = f"Run {str(latest_step.get('run_id') or '')[:8]}"
+                if step_timestamp:
+                    detail += f" · {format_timestamp(str(step_timestamp))}"
+                month_step_cells.append(
+                    PeriodFlowStepCell(
+                        step_key, label, tone, detail, str(latest_step.get("run_id") or ""),
+                        str(latest_step.get("run_status") or ""),
+                        str(latest_step.get("message") or ""),
+                        format_timestamp(str(step_timestamp)) if step_timestamp else "",
+                    )
+                )
+                if step_timestamp:
+                    timestamps.append(str(step_timestamp))
+            else:
+                month_step_cells.append(
+                    PeriodFlowStepCell(step_key, "Not started", "idle", "No step record")
+                )
+
+        raw_month = re.fullmatch(r"(\d{4})-(\d{2})", month)
+        if raw_month and 1 <= int(raw_month.group(2)) <= 12:
+            month_label = f"{calendar.month_name[int(raw_month.group(2))]} {raw_month.group(1)}"
+        else:
+            month_label = f"Reporting month · {month}"
+        rows.append(
+            PeriodFlowRow(
+                reporting_month=month,
+                month_label=month_label,
+                updated=format_timestamp(max(timestamps, key=_timestamp_sort_key)) if timestamps else "—",
+                latest_run=as_run(ordered_runs[0]),
+                runs=tuple(as_run(run) for run in ordered_runs),
+                steps=tuple(month_step_cells),
+            )
+        )
+    return tuple(sorted(rows, key=lambda row: row.reporting_month, reverse=True))
 
 
 _STATUS_DETAILS: dict[str, tuple[str, str, str]] = {
