@@ -151,6 +151,15 @@ def month_end_dates(reporting_month: str) -> tuple[str, str]:
     return current.isoformat(), previous.isoformat()
 
 
+def month_start_dates(reporting_month: str) -> tuple[str, str]:
+    """Return the operating month and preceding calendar month as ISO dates."""
+    year, month = map(int, reporting_month.split("-"))
+    current = date(year, month, 1)
+    previous_year, previous_month = (year - 1, 12) if month == 1 else (year, month - 1)
+    previous = date(previous_year, previous_month, 1)
+    return current.isoformat(), previous.isoformat()
+
+
 def row_dicts(cursor: Any) -> list[dict[str, Any]]:
     rows = cursor.fetchall()
     description = getattr(cursor, "description", None) or []
@@ -305,25 +314,47 @@ def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _table_branch_sql(table: PostcheckTable) -> tuple[str, tuple[str, str]]:
+def _table_branch_sql(
+    table: PostcheckTable, current_date: str, prior_date: str
+) -> tuple[str, tuple[str, ...]]:
     quoted_table = quoted_identifier(table.name, "post-check table name")
     quoted_project_column = f'"{table.project_column}"'
     quoted_report_date_column = f'"{table.report_date_column}"'
     quoted_dw_created_time_column = f'"{table.dw_created_time_column}"'
     if table.report_date_type == "varchar_yyyy_mm_dd":
-        date_expression = f"TO_VARCHAR({quoted_report_date_column})"
-        date_filter = f"{quoted_report_date_column} IN (%s, %s)"
+        report_date_expression = f"TO_VARCHAR({quoted_report_date_column})"
+        if table.comparison_mode == "fiscal_month":
+            date_filter = f"{quoted_report_date_column} = %s"
+            date_params = (current_date,)
+        else:
+            date_filter = f"{quoted_report_date_column} IN (%s, %s)"
+            date_params = (current_date, prior_date)
     else:
-        date_expression = f"TO_VARCHAR({quoted_report_date_column}, 'YYYY-MM-DD')"
-        date_filter = f"{quoted_report_date_column} IN (TO_DATE(%s), TO_DATE(%s))"
+        report_date_expression = f"TO_VARCHAR({quoted_report_date_column}, 'YYYY-MM-DD')"
+        if table.comparison_mode == "fiscal_month":
+            date_filter = f"{quoted_report_date_column} = TO_DATE(%s)"
+            date_params = (current_date,)
+        else:
+            date_filter = f"{quoted_report_date_column} IN (TO_DATE(%s), TO_DATE(%s))"
+            date_params = (current_date, prior_date)
+    if table.comparison_mode == "fiscal_month":
+        assert table.fiscal_month_column is not None
+        fiscal_month_column = f'"{table.fiscal_month_column}"'
+        if table.fiscal_month_type == "date":
+            period_expression = f"TO_VARCHAR({fiscal_month_column}, 'YYYY-MM-DD')"
+        else:
+            period_expression = f"TO_VARCHAR({fiscal_month_column})"
+    else:
+        period_expression = report_date_expression
     return (
         "\n".join(
             (
-                "SELECT table_name, project_code, report_date",
+                "SELECT table_name, project_code, report_date, period_value",
                 "FROM (",
                 "    SELECT " + _sql_string_literal(table.name) + " AS table_name,",
                 f"           TO_VARCHAR({quoted_project_column}) AS project_code,",
-                f"           {date_expression} AS report_date,",
+                f"           {report_date_expression} AS report_date,",
+                f"           {period_expression} AS period_value,",
                 f"           {quoted_dw_created_time_column} AS ingestion_time",
                 f"    FROM {quoted_table}",
                 f"    WHERE {date_filter}",
@@ -334,7 +365,7 @@ def _table_branch_sql(table: PostcheckTable) -> tuple[str, tuple[str, str]]:
                 "))",
             )
         ),
-        (),
+        date_params,
     )
 
 
@@ -343,16 +374,23 @@ def build_project_postcheck_sql(
     expected_project_codes: tuple[str, ...],
     current_date: str,
     prior_date: str,
+    current_fiscal_month: str | None = None,
+    prior_fiscal_month: str | None = None,
 ) -> tuple[str, tuple[Any, ...]]:
-    """Build one parameterized query for all configured tables and expected projects."""
+    """Build one parameterized query for report-date and fiscal-month comparisons."""
+    if current_fiscal_month is None or prior_fiscal_month is None:
+        current_fiscal_month, prior_fiscal_month = current_date[:7] + "-01", prior_date[:7] + "-01"
     branches: list[str] = []
     parameters: list[Any] = [json.dumps(expected_project_codes)]
     configured_table_values: list[str] = []
     for table in rule.tables:
-        branch, _ = _table_branch_sql(table)
+        branch, branch_params = _table_branch_sql(table, current_date, prior_date)
         branches.append(branch)
-        parameters.extend((current_date, prior_date))
-        configured_table_values.append("(" + _sql_string_literal(table.name) + ")")
+        parameters.extend(branch_params)
+        configured_table_values.append(
+            "(" + _sql_string_literal(table.name) + ", "
+            + _sql_string_literal(table.comparison_mode) + ")"
+        )
 
     table_rows_sql = "\nUNION ALL\n".join(branches)
     sql = f"""
@@ -360,8 +398,8 @@ WITH expected_projects AS (
     SELECT VALUE::VARCHAR AS project_code
     FROM TABLE(FLATTEN(INPUT => PARSE_JSON(%s)))
 ),
-configured_tables(table_name) AS (
-    SELECT COLUMN1 FROM VALUES {", ".join(configured_table_values)}
+configured_tables(table_name, comparison_mode) AS (
+    SELECT COLUMN1, COLUMN2 FROM VALUES {", ".join(configured_table_values)}
 ),
 table_rows AS (
     {table_rows_sql}
@@ -379,8 +417,16 @@ project_counts AS (
     SELECT
         configured_tables.table_name,
         expected_projects.project_code,
-        COUNT_IF(table_rows.report_date = %s) AS current_rows,
-        COUNT_IF(table_rows.report_date = %s) AS prior_rows
+        COALESCE(COUNT_IF(
+            (configured_tables.comparison_mode = 'report_date' AND table_rows.period_value = %s)
+            OR (configured_tables.comparison_mode = 'fiscal_month'
+                AND table_rows.report_date = %s AND table_rows.period_value = %s)
+        ), 0) AS current_rows,
+        COALESCE(COUNT_IF(
+            (configured_tables.comparison_mode = 'report_date' AND table_rows.period_value = %s)
+            OR (configured_tables.comparison_mode = 'fiscal_month'
+                AND table_rows.report_date = %s AND table_rows.period_value = %s)
+        ), 0) AS prior_rows
     FROM configured_tables
     CROSS JOIN expected_projects
     LEFT JOIN table_rows
@@ -398,7 +444,17 @@ FROM project_counts
 INNER JOIN table_counts USING (table_name)
 ORDER BY project_counts.table_name, project_counts.project_code
 """.strip()
-    parameters.extend((current_date, current_date, prior_date))
+    parameters.extend(
+        (
+            current_date,
+            current_date,
+            current_date,
+            current_fiscal_month,
+            prior_date,
+            current_date,
+            prior_fiscal_month,
+        )
+    )
     return sql, tuple(parameters)
 
 
@@ -415,9 +471,15 @@ def evaluate_project_postcheck(
     rows: list[dict[str, Any]],
     current_date: str,
     prior_date: str,
+    current_fiscal_month: str | None = None,
+    prior_fiscal_month: str | None = None,
 ) -> dict[str, Any]:
     """Validate the one-query result and return receipt-ready data or raise a gate failure."""    
     expected_projects = set(expected_project_codes)
+    has_fiscal_month_tables = any(table.comparison_mode == "fiscal_month" for table in rule.tables)
+    if current_fiscal_month is None or prior_fiscal_month is None:
+        reporting_month = current_date[:7]
+        current_fiscal_month, prior_fiscal_month = month_start_dates(reporting_month)
     expected_tables = {table.name.casefold(): table for table in rule.tables}
     grouped: dict[str, list[dict[str, Any]]] = {table.name.casefold(): [] for table in rule.tables}
     seen_pairs: set[tuple[str, str]] = set()
@@ -447,6 +509,7 @@ def evaluate_project_postcheck(
         actual_count = actual_counts.pop()
         project_results: list[dict[str, Any]] = []
         missing_projects: list[str] = []
+        missing_prior_projects: list[str] = []
         delta_breaches: list[dict[str, Any]] = []
         for row in sorted(table_rows, key=lambda item: str(item["project_code"])):
             project_code = str(row["project_code"])
@@ -463,20 +526,34 @@ def evaluate_project_postcheck(
             if current_rows == 0:
                 project_result["outcome"] = "FAILED"
                 missing_projects.append(project_code)
-            if rule.enforce_row_count_delta and absolute_delta > rule.max_abs_row_count_delta:
+            if table.comparison_mode == "fiscal_month" and prior_rows == 0:
+                project_result["outcome"] = "FAILED"
+                missing_prior_projects.append(project_code)
+            if (
+                rule.enforce_row_count_delta
+                and current_rows > 0
+                and prior_rows > 0
+                and absolute_delta > rule.max_abs_row_count_delta
+            ):
                 project_result["outcome"] = "FAILED"
                 delta_breaches.append(project_result.copy())
             project_results.append(project_result)
         table_result = {
             "table_name": table.name,
+            "comparison_mode": table.comparison_mode,
             "ingestion_selection": "latest_dw_created_time_trailing_window",
             "ingestion_cluster_interval_seconds": table.ingestion_cluster_interval_seconds,
             "expected_distinct_project_count": len(expected_project_codes),
             "actual_distinct_project_count": actual_count,
             "missing_current_projects": missing_projects,
+            "missing_prior_projects": missing_prior_projects,
             "project_results": project_results,
             "outcome": "SUCCEEDED",
         }
+        if table.comparison_mode == "fiscal_month":
+            table_result["report_date_snapshot"] = current_date
+            table_result["current_fiscal_month"] = current_fiscal_month
+            table_result["prior_fiscal_month"] = prior_fiscal_month
         if actual_count != len(expected_project_codes):
             table_result["outcome"] = "FAILED"
             violations.append(
@@ -484,7 +561,19 @@ def evaluate_project_postcheck(
             )
         if missing_projects:
             table_result["outcome"] = "FAILED"
-            violations.append(f"{table.name} is missing current-month project {missing_projects[0]}")
+            if table.comparison_mode == "fiscal_month":
+                violations.append(
+                    f"{table.name} project {missing_projects[0]} has no rows for current fiscal month "
+                    f"{current_fiscal_month} in report-date snapshot {current_date}"
+                )
+            else:
+                violations.append(f"{table.name} is missing current-month project {missing_projects[0]}")
+        if missing_prior_projects:
+            table_result["outcome"] = "FAILED"
+            violations.append(
+                f"{table.name} project {missing_prior_projects[0]} has no rows for prior fiscal month "
+                f"{prior_fiscal_month} in report-date snapshot {current_date}"
+            )
         if delta_breaches:
             table_result["outcome"] = "FAILED"
             first = delta_breaches[0]
@@ -500,13 +589,20 @@ def evaluate_project_postcheck(
         "before_task": rule.before_task,
         "reporting_date": current_date,
         "prior_reporting_date": prior_date,
+        "comparison_mode": "mixed" if has_fiscal_month_tables and any(
+            table.comparison_mode == "report_date" for table in rule.tables
+        ) else ("fiscal_month" if has_fiscal_month_tables else "report_date"),
         "expected_distinct_project_count": len(expected_project_codes),
         "ingestion_selection": "latest_dw_created_time_trailing_window",
         "tables": table_results,
         "outcome": "SUCCEEDED" if not violations else "FAILED",
     }
+    if has_fiscal_month_tables:
+        result["current_fiscal_month"] = current_fiscal_month
+        result["prior_fiscal_month"] = prior_fiscal_month
     if violations:
-        result["error"] = "Post-check failed; Task B was not triggered: " + violations[0]
+        prefix = "Terminal Silver post-check failed: " if rule.terminal else "Post-check failed; Task B was not triggered: "
+        result["error"] = prefix + violations[0]
         raise PostcheckFailure(str(result["error"]), result)
     return result
 

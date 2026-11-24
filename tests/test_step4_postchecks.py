@@ -80,7 +80,7 @@ def test_postcheck_builds_one_parameterized_union_query() -> None:
     assert "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_PARALLEL" in sql
     assert "CHUNWO_DB.PUBLIC.MFR_1_BRONZE_PROJECTION" in sql
     assert params[0] == json.dumps(("1010", "1014"))
-    assert len(params) == 14
+    assert len(params) == 18
     assert "1010" not in sql
 
 
@@ -149,6 +149,175 @@ def test_postcheck_fails_for_missing_project_and_count_mismatch() -> None:
 
 def test_postcheck_month_end_handles_january_rollover() -> None:
     assert month_end_dates("2026-01") == ("2026-01-31", "2025-12-31")
+
+
+def monthly_silver_rule() -> PostcheckRule:
+    monthly_tables = tuple(
+        PostcheckTable(
+            f"CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_{name}",
+            "PROJECT_CODE",
+            "REPORT_DATE",
+            "date",
+            comparison_mode="fiscal_month",
+            fiscal_month_column="FISCAL_YEAR_MONTH",
+            fiscal_month_type="varchar_yyyy_mm_dd",
+        )
+        for name in ("ACCRUAL", "CASH_FLOW", "COMMITTED_COST", "PROJECTION")
+    )
+    main_table = PostcheckTable(
+        "CHUNWO_DB.MFR.MFR_2_SILVER",
+        "PROJECT_CODE",
+        "REPORT_DATE",
+        "varchar_yyyy_mm_dd",
+    )
+    return PostcheckRule(
+        "silver-check",
+        True,
+        "CHUNWO_DB.PUBLIC.TASK_MFR_BRONZE_TO_SILVER",
+        "",
+        (main_table, *monthly_tables),
+        1,
+        terminal=True,
+    )
+
+
+def silver_rows(
+    *, current_rows: int = 91, prior_rows: int = 91
+) -> list[dict[str, object]]:
+    rule_value = monthly_silver_rule()
+    return [
+        {
+            "table_name": table.name,
+            "project_code": "1010",
+            "current_rows": 92 if table.comparison_mode == "report_date" else current_rows,
+            "prior_rows": 91 if table.comparison_mode == "report_date" else prior_rows,
+            "actual_distinct_project_count": 1,
+        }
+        for table in rule_value.tables
+    ]
+
+
+def test_silver_sql_compares_four_fiscal_tables_within_current_report_snapshot() -> None:
+    sql, params = build_project_postcheck_sql(
+        monthly_silver_rule(), ("1010",), "2026-10-31", "2026-09-30"
+    )
+
+    assert "CHUNWO_DB.MFR.MFR_2_SILVER" in sql
+    assert "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_ACCRUAL" in sql
+    assert sql.count('TO_VARCHAR("FISCAL_YEAR_MONTH") AS period_value') == 4
+    assert sql.count('"REPORT_DATE" = TO_DATE(%s)') == 4
+    assert "2026-10-01" not in sql
+    assert "PARTITION BY project_code, report_date" in sql
+    assert "DATEADD(second, -120, MAX(ingestion_time) OVER" in sql
+    assert params[0] == json.dumps(("1010",))
+    assert sql.count("%s") == len(params)
+    assert params.count("2026-10-31") == 9
+    assert params.count("2026-09-30") == 2
+    assert params.count("2026-10-01") == 1
+    assert params.count("2026-09-01") == 1
+
+
+def test_silver_evaluation_passes_equal_fiscal_month_counts_and_preserves_main_snapshot_check() -> None:
+    result = evaluate_project_postcheck(
+        monthly_silver_rule(),
+        ("1010",),
+        silver_rows(),
+        "2026-10-31",
+        "2026-09-30",
+    )
+
+    assert result["outcome"] == "SUCCEEDED"
+    assert result["comparison_mode"] == "mixed"
+    assert result["current_fiscal_month"] == "2026-10-01"
+    assert result["prior_fiscal_month"] == "2026-09-01"
+    assert result["tables"][0]["comparison_mode"] == "report_date"
+    assert result["tables"][0]["project_results"][0]["current_rows"] == 92
+    assert all(table["comparison_mode"] == "fiscal_month" for table in result["tables"][1:])
+    assert all(table["report_date_snapshot"] == "2026-10-31" for table in result["tables"][1:])
+
+
+def test_silver_fiscal_delta_of_one_passes_but_two_fails() -> None:
+    result = evaluate_project_postcheck(
+        monthly_silver_rule(),
+        ("1010",),
+        silver_rows(current_rows=92, prior_rows=91),
+        "2026-10-31",
+        "2026-09-30",
+    )
+    assert result["outcome"] == "SUCCEEDED"
+
+    with pytest.raises(PostcheckFailure, match="allowed difference: 1"):
+        evaluate_project_postcheck(
+            monthly_silver_rule(),
+            ("1010",),
+            silver_rows(current_rows=93, prior_rows=91),
+            "2026-10-31",
+            "2026-09-30",
+        )
+
+
+def test_silver_fiscal_missing_prior_month_fails_even_when_delta_is_one() -> None:
+    with pytest.raises(PostcheckFailure, match="no rows for prior fiscal month 2026-09-01") as error:
+        evaluate_project_postcheck(
+            monthly_silver_rule(),
+            ("1010",),
+            silver_rows(current_rows=1, prior_rows=0),
+            "2026-10-31",
+            "2026-09-30",
+        )
+
+    assert error.value.result["outcome"] == "FAILED"
+    assert error.value.result["tables"][1]["missing_prior_projects"] == ["1010"]
+    assert "Task B was not triggered" not in str(error.value)
+
+
+def test_silver_fiscal_missing_current_month_fails() -> None:
+    with pytest.raises(PostcheckFailure, match="no rows for current fiscal month 2026-10-01"):
+        evaluate_project_postcheck(
+            monthly_silver_rule(),
+            ("1010",),
+            silver_rows(current_rows=0, prior_rows=91),
+            "2026-10-31",
+            "2026-09-30",
+        )
+
+
+@pytest.mark.parametrize(
+    ("reporting_month", "current", "prior"),
+    [
+        ("2026-01", "2026-01-01", "2025-12-01"),
+        ("2026-04", "2026-04-01", "2026-03-01"),
+    ],
+)
+def test_fiscal_month_periods_roll_over_calendar_year_and_april_boundary(
+    reporting_month: str, current: str, prior: str
+) -> None:
+    from mfr_snowflake_task.trigger_task import month_start_dates
+
+    assert month_start_dates(reporting_month) == (current, prior)
+
+
+def test_terminal_rule_config_uses_fiscal_month_only_for_four_monthly_tables() -> None:
+    config_path = Path(__file__).parents[1] / "mfr_snowflake_task" / "task_postchecks.json"
+    rules = load_postcheck_rules(
+        config_path,
+        [
+            "CHUNWO_DB.PUBLIC.TASK_MFR_EXCEL_TO_TABLE_MFR_PARALLEL",
+            "CHUNWO_DB.PUBLIC.TASK_MFR_BRONZE_TO_SILVER",
+        ],
+        "sequential",
+    )
+    silver = next(item for item in rules if item.id == "silver-project-completeness-terminal")
+    modes = {table.name.rsplit(".", 1)[-1]: table.comparison_mode for table in silver.tables}
+
+    assert modes["MFR_2_SILVER"] == "report_date"
+    assert len([mode for mode in modes.values() if mode == "fiscal_month"]) == 4
+    assert all(
+        table.fiscal_month_column == "FISCAL_YEAR_MONTH"
+        and table.fiscal_month_type == "varchar_yyyy_mm_dd"
+        for table in silver.tables
+        if table.comparison_mode == "fiscal_month"
+    )
 
 
 def test_postcheck_config_rejects_parallel_enabled_rule(tmp_path: Path) -> None:

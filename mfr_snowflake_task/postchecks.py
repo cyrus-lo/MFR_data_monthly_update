@@ -9,6 +9,8 @@ from pathlib import Path
 
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 DATE_TYPES = {"varchar_yyyy_mm_dd", "date"}
+FISCAL_MONTH_TYPES = {"date", "varchar_yyyy_mm_dd"}
+COMPARISON_MODES = {"report_date", "fiscal_month"}
 CHECK_TYPE = "project_count_and_row_delta"
 TERMINAL_CHECK_TYPE = "silver_project_completeness"
 DIAGNOSTIC_CHECK_TYPE = "whole_table_diagnostic"
@@ -20,7 +22,7 @@ class PostcheckConfigError(ValueError):
 
 @dataclass(frozen=True)
 class PostcheckTable:
-    """One allowlisted Bronze table used by a built-in project completeness check."""
+    """One allowlisted table and its post-check comparison policy."""
 
     name: str
     project_column: str
@@ -28,6 +30,9 @@ class PostcheckTable:
     report_date_type: str
     dw_created_time_column: str = "DW_CREATED_TIME"
     ingestion_cluster_interval_seconds: int = 120
+    comparison_mode: str = "report_date"
+    fiscal_month_column: str | None = None
+    fiscal_month_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,28 @@ def _parse_table(value: object, index: int) -> PostcheckTable:
         raise PostcheckConfigError(
             f"post-check table {index} ingestion_cluster_interval_seconds must be a positive integer"
         )
+    comparison_mode = str(raw.get("comparison_mode", "report_date")).strip().lower()
+    if comparison_mode not in COMPARISON_MODES:
+        raise PostcheckConfigError(
+            f"post-check table {index} comparison_mode must be one of: "
+            f"{', '.join(sorted(COMPARISON_MODES))}"
+        )
+    fiscal_month_column = None
+    fiscal_month_type = None
+    if comparison_mode == "fiscal_month":
+        fiscal_month_column = validate_identifier(
+            raw.get("fiscal_month_column"), f"post-check table {index} fiscal_month_column"
+        )
+        fiscal_month_type = str(raw.get("fiscal_month_type", "")).strip().lower()
+        if fiscal_month_type not in FISCAL_MONTH_TYPES:
+            raise PostcheckConfigError(
+                f"post-check table {index} fiscal_month_type must be one of: "
+                f"{', '.join(sorted(FISCAL_MONTH_TYPES))}"
+            )
+    elif "fiscal_month_column" in raw or "fiscal_month_type" in raw:
+        raise PostcheckConfigError(
+            f"post-check table {index} fiscal month settings require comparison_mode=fiscal_month"
+        )
     return PostcheckTable(
         name=name,
         project_column=validate_identifier(raw.get("project_column"), f"post-check table {index} project_column"),
@@ -106,6 +133,9 @@ def _parse_table(value: object, index: int) -> PostcheckTable:
             f"post-check table {index} dw_created_time_column",
         ),
         ingestion_cluster_interval_seconds=interval,
+        comparison_mode=comparison_mode,
+        fiscal_month_column=fiscal_month_column,
+        fiscal_month_type=fiscal_month_type,
     )
 
 

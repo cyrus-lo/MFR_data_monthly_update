@@ -79,7 +79,10 @@
           "report_date_column": "REPORT_DATE",
           "report_date_type": "date",
           "dw_created_time_column": "DW_CREATED_TIME",
-          "ingestion_cluster_interval_seconds": 120
+          "ingestion_cluster_interval_seconds": 120,
+          "comparison_mode": "fiscal_month",
+          "fiscal_month_column": "FISCAL_YEAR_MONTH",
+          "fiscal_month_type": "varchar_yyyy_mm_dd"
         },
         {
           "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_CASH_FLOW",
@@ -87,7 +90,10 @@
           "report_date_column": "REPORT_DATE",
           "report_date_type": "date",
           "dw_created_time_column": "DW_CREATED_TIME",
-          "ingestion_cluster_interval_seconds": 120
+          "ingestion_cluster_interval_seconds": 120,
+          "comparison_mode": "fiscal_month",
+          "fiscal_month_column": "FISCAL_YEAR_MONTH",
+          "fiscal_month_type": "varchar_yyyy_mm_dd"
         },
         {
           "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_COMMITTED_COST",
@@ -95,7 +101,10 @@
           "report_date_column": "REPORT_DATE",
           "report_date_type": "date",
           "dw_created_time_column": "DW_CREATED_TIME",
-          "ingestion_cluster_interval_seconds": 120
+          "ingestion_cluster_interval_seconds": 120,
+          "comparison_mode": "fiscal_month",
+          "fiscal_month_column": "FISCAL_YEAR_MONTH",
+          "fiscal_month_type": "varchar_yyyy_mm_dd"
         },
         {
           "name": "CHUNWO_DB.MFR.MFR_2_SILVER_MONTHLY_PROJECTION",
@@ -103,7 +112,10 @@
           "report_date_column": "REPORT_DATE",
           "report_date_type": "date",
           "dw_created_time_column": "DW_CREATED_TIME",
-          "ingestion_cluster_interval_seconds": 120
+          "ingestion_cluster_interval_seconds": 120,
+          "comparison_mode": "fiscal_month",
+          "fiscal_month_column": "FISCAL_YEAR_MONTH",
+          "fiscal_month_type": "varchar_yyyy_mm_dd"
         }
       ],
       "diagnostics": [
